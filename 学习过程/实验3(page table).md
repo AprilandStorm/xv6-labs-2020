@@ -14,3 +14,7 @@
 教授答：不会的，MMU会告诉操作系统或者处理器，抱歉我不能翻译这个地址，最终会变成一个page fault。如果一个地址不能被翻译，那就不翻译。
 7. 学生问：怎么计算page table的物理地址，是不是这样，我们从最高级的page table得到44bit的PPN，然后再加上虚拟地址中的12bit offset，就得到了完整的56比特page table物理地址？\
 教授回答：不会加上虚拟地址中的offset，这里只是使用了12bit的0。所以我们用44bit的PPN，再加上12bit的0，这样就得到了下一级page directory的56bit物理地址。这里要求每个page directory都与物理page对齐（也就是page directory的起始地址就是某个page的起始地址，所有低12bit都为0）.     
+8. 学生提问：3级的page table是由操作系统实现还是由硬件自己实现的？\
+教授回答：这是由硬件实现的，所有3级page table的查找都发生在硬件中。MMU是硬件的一部分而不是操作系统的一部分。在XV6中，有一个函数也实现了page table的查找，因为时不时的xv6也需要完成硬件的工作，所以XV6有这个叫做walk的函数，他在软件中实现了MMU硬件相同的功能。
+9. 学生提问：之前提到，硬件会完成3级page table的查找，那为什么我们要在XV6中有一个walk函数来完成同样的工作？\
+教授回答： 这里有几个原因，首先XV6中的walk函数设置了最初的page table，它需要对三级page table进行编程所以它首先要能模拟3级page table。另一个原因或许你们已经在syscall实验中遇到了，在XV6中，内核有它自己的page table,用户进程也有自己的page table，用户进程指向sys_info结构体的指针存在于用户空间的page table，但是内核需要将这个指针翻译成一个自己可以读写的物理地址。如果你查看copy_in，copy_out，你可以发现内核会通过用户进程的page table，将用户的虚拟地址翻译得到物理地址，这样内核可以读写相应的物理内存地址     
