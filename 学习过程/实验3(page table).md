@@ -68,3 +68,7 @@ walk(pagetable_t pagetable, uint64 va, int alloc)
 22. 学生问：为什么通过三级page table会比一个超大的page table更好呢？\
 教授答：3级page table中，大量的PTE都是可以不存储。比如，对于最高级的page table里面，如果有一个PTE为空，那么就完全不用创建它对应的中间级和最底层page table，以及里面的PTE。所以，这就像是在整个虚拟地址空间中的一大段地址完全不需要有映射一样
 
+# 实验3
+- 需要切换到本次实现的分支：pgtbl
+## 知识点
+实现开始前，最好阅读(XV6手册)[https://pdos.csail.mit.edu/6.S081/2020/xv6/book-riscv-rev1.pdf]的第三章，以及阅读源码`kernel/vm.c`。
