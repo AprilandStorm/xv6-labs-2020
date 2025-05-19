@@ -18,3 +18,52 @@
 教授回答：这是由硬件实现的，所有3级page table的查找都发生在硬件中。MMU是硬件的一部分而不是操作系统的一部分。在XV6中，有一个函数也实现了page table的查找，因为时不时的xv6也需要完成硬件的工作，所以XV6有这个叫做walk的函数，他在软件中实现了MMU硬件相同的功能。
 9. 学生提问：之前提到，硬件会完成3级page table的查找，那为什么我们要在XV6中有一个walk函数来完成同样的工作？\
 教授回答： 这里有几个原因，首先XV6中的walk函数设置了最初的page table，它需要对三级page table进行编程所以它首先要能模拟3级page table。另一个原因或许你们已经在syscall实验中遇到了，在XV6中，内核有它自己的page table,用户进程也有自己的page table，用户进程指向sys_info结构体的指针存在于用户空间的page table，但是内核需要将这个指针翻译成一个自己可以读写的物理地址。如果你查看copy_in，copy_out，你可以发现内核会通过用户进程的page table，将用户的虚拟地址翻译得到物理地址，这样内核可以读写相应的物理内存地址     
+10. 学生问：对于不同的进程会有不同的kernel stack吗？\
+教授答：是的，每个用户进程都有一个对应的kernel stack
+11. 学生问：用户程序的虚拟内存会映射到未使用的物理地址空间吗？\
+教授回答：在kernel page table中，有一段Free Memory，它对应了物理内存中的一段地址。XV6使用这段free memory来存放用户进程的page table，text，data。如果我们运行了非常多的用户进程，某个时间点我们会耗尽这段内存，这个时候fork或者exec会返回错误。
+12. 学生问：这就意味着，用户进程的虚拟地址会比内核的虚拟地址空间小的多，是吗？\
+教授回答：本质上来说，两边的虚拟地址空间大小是一样的。但用户进程的虚拟地址空间使用率会更低。
+13. 学生问：如果多个进程都将内存映射到了同一个物理位置，这里会优化合并到同一个地址吗？\
+教授回答：XV6不会做这样的事情，但是page table实验中有一部分就是在做这个事情。真正的操作系统会做这样的工作
+14. 学生问：每个进程都会有自己的3级树状page table，通过这个page table将虚拟地址翻译成物理地址。所以看起来当我们将内核虚拟地址翻译成物理地址时，我们并不需要kernel的page table，因为进程会使用自己的树状page table并完成地址翻译\
+教授回答：当kernel创建了一个进程，针对这个进程的page table也会从free memory中分配出来。内核会为用户进程的page table分配几个page，并填入PTE。在某个时间点，当内核运行了这个进程，内核会将进程的根page table的地址加载到SATP中。从那个时间点开始，处理器会使用内核为那个进程构建的虚拟地址空间。
+15. 学生提问：所以内核为进程放弃了一些自己的内存，但是进程的虚拟地址空间理论上与内核的虚拟地址空间一样大，虽然实际中肯定不会这样大\
+教授回答：是的，用户进程的虚拟地址空间分布，与内核地址空间一样，他也是从0到MAXVA。它有由内核设置好的，专属于进程的page table来完成地址翻译。
+16. 学生提问：但是我们不能将所有的MAXVA地址都使用吧？\
+教授回答：是的，否则我们会耗尽内存。大多数的进程使用的内存都远远小于虚拟地址空间
+17. 教授答：walk这个函数会返回page table的PTE，而内核可以读写PTE。这个函数的作用是返回某一个PTE的指针。这是个虚拟地址，它指向了这个PTE。之后内核可以通过向这个地址写数据来操纵这条PTE执行的物理page。当page table被加载到SATP寄存器，这里的更改就会生效。\
+```
+//walk
+pte_t *
+walk(pagetable_t pagetable, uint64 va, int alloc)
+{
+   if(va >= MAXVA){
+       panic("walk");
+   }
+   for(inr level = 2; level > 0; level--){
+       pte_t* pte = &pagetable[PX(level,va)];
+       if(* pte & PTE_V){
+           pagetable = (pagetable_t)PTE2PA(* pte);
+       }
+       else{
+           if(!alloc || (pagetable = (pde_t*)kalloc()) == 0){
+                 return 0;
+           }
+           memset(pagetable, 0, PGSIZE);
+           * pte = PA2PTE(PAGETABLE) | PTE_V;
+       }
+   }
+   return &pagetable[PX(0, va)];
+}
+```
+从代码看，这个函数从level2走到level1然后到level0，如果参数alloc不为0，且某一个level的page table不存在，这个函数就会创建一个临时的page table，将内容初始化为0，并继续运行。所以最后总是返回的是最低一级的page directory的PTE\
+如果参数alloc没有设置，那么在第一个PTE对应的下一级page table不存在时就会返回
+18. 学生问：对于walk函数，在写完SATP寄存器之后，内核还能直接访问物理地址吗？在代码里面看起来像是通过page table将虚拟地址翻译成了物理地址，但是这个时候SATP已经被设置了，得到的物理地址不会被认为是虚拟地址吗？\
+教授回答：来看一下kvminithart函数，这里的kernel_page_table是一个物理地址，并写入到SATP寄存器中。从那以后，我们代码运行在一个我们构建出来的地址空间中。在之前的kvminit函数中，kvmmap会对每个地址或者每个page调用walk函数
+19. 学生问：在SATP寄存器设置完之后，walk是不是还是按照相同的方式工作？\
+教授答：是的。它还能工作的原因是，内核设置了虚拟地址等于物理地址的映射关系，因为很多地方能工作的原因都是因为内核设置的地址映射关系是相同的。
+20. 学生问：每一个进程的SATP寄存器存在哪？\
+教授答：每个CPU核只有一个SATP寄存器，但是在每个proc结构体，如果你查看proc.h，里面有一个指向page table的指针，这对应了进程的根page table物理内存地址
+21. 学生问：为什么通过三级page table会比一个超大的page table更好呢？\
+教授答：3级page table中，大量的PTE都是可以不存储。比如，对于最高级的page table里面，如果有一个PTE为空，那么就完全不用创建它对应的中间级和最底层page table，以及里面的PTE。所以，这就像是在整个虚拟地址空间中的一大段地址完全不需要有映射一样
