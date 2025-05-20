@@ -7,8 +7,7 @@
 3. 教授说：是的，我们泵让我们的地址翻译依赖于另一个翻译，否则我们可能陷入递归的无线循环中。所以page directory必须存物理地址。那SATP呢？它存的是物理地址还是虚拟地址？\
 学生回答：还是物理地址，因为最高级的page directory还是存在物理内存中，对吧\
 教授说：是的，必须是物理地址，因为我们要用它来完成地址翻译，而不是对它进行地址翻译。所以SATP需要知道最高一级的page directory的物理地址是什么
-4. 学生问：这里有层次化的3个page table，每个page table都是用虚拟地址的9个比特来索引，所以是由虚拟地址
-5. 中的3个9比特来分别索引3个page table吗？\
+4. 学生问：这里有层次化的3个page table，每个page table都是用虚拟地址的9个比特来索引，所以是由虚拟地址中的3个9比特来分别索引3个page table吗？\
 教授答：是的，最高的9比特用来索引最高一级的page directory，以此类推
 6. 学生问：最高一级的page table会用虚拟内存地址中的27bit index的最高9bit来完成索引，如果索引为空，MMU会自动创建一个page table吗？\
 教授答：不会的，MMU会告诉操作系统或者处理器，抱歉我不能翻译这个地址，最终会变成一个page fault。如果一个地址不能被翻译，那就不翻译。
@@ -77,3 +76,5 @@ walk(pagetable_t pagetable, uint64 va, int alloc)
 ## Print a page table
 - 该实验需要实验一个打印页表内容的函数，以题目所示的格式打印传进的页表
 - 需要模拟查询页表的过程，对三级页表进行遍历并打印。在虚拟内存相关的`kernel/vm.c`中的`free walk()`函数已经实现了递归遍历页表并将其释放，所以只要模仿其逻辑实现打印功能即可。
+- 在内核头文件`kernel/defs.h`中添加函数声明
+- 按照实验要求，在`kernel/exec.c`中exec函数的`return argc`之前插入`if(p->pid==1) kama_vmprint(p->pagetable)`，来带引第一个进程的页表
