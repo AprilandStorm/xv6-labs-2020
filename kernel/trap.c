@@ -43,29 +43,31 @@ usertrap(void)
 
   // send interrupts and exceptions to kerneltrap(),
   // since we're now in the kernel.
-  w_stvec((uint64)kernelvec);
+  w_stvec((uint64)kernelvec);//先将STVEC指向了kernelvec变量，这是内核空间trap处理代码的位置
 
-  struct proc *p = myproc();
+  struct proc *p = myproc();//调用myproc函数来得到之前运行的是什么进程；myproc函数会查找一个根据当前CPU核的编号索引的数组
   
   // save user program counter.
-  p->trapframe->epc = r_sepc();
+  p->trapframe->epc = r_sepc();// 把 sepc 的值保存进 trapframe
   
+
+  //找出我们会出现在usertrap函数的原因；根据触发trap的原因，risc-v的SCAUSE寄存器会有不同的数字
   if(r_scause() == 8){
     // system call
 
-    if(p->killed)
+    if(p->killed)//如果其他进程杀掉了当前进程，检查不通过，退出
       exit(-1);
 
     // sepc points to the ecall instruction,
     // but we want to return to the next instruction.
-    p->trapframe->epc += 4;
+    p->trapframe->epc += 4;//对于保存的用户程序计数器加4，这样我们会在ecall的下一条指令恢复，而不是重新执行ecall指令
 
     // an interrupt will change sstatus &c registers,
     // so don't enable until done with those registers.
-    intr_on();
+    intr_on();//显式的打开中断
 
-    syscall();
-  } else if((which_dev = devintr()) != 0){
+    syscall();//从syscall表单中，根据系统调用的编号查找相应的系统调用函数；获取由trampoline代码保存在trapframe中a7的数字，然后用这个数字索引实现了每个系统调用的表单
+  } else if((which_dev = devintr()) != 0){//检查是否有设备中断
     // ok
   } else {
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
@@ -77,10 +79,28 @@ usertrap(void)
     exit(-1);
 
   // give up the CPU if this is a timer interrupt.
-  if(which_dev == 2)
-    yield();
+  //if(which_dev == 2)
+    //yield();
+  
 
-  usertrapret();
+  //give up the CPU if thise is a timer interrupt
+  if(which_dev == 2){
+    if(p->alarm_interval != 0){//如果设定了时钟事件
+      if(--p->alarm_ticks <= 0){//如果倒计时-1 tick,如果已经到达或者超过设定的tick数
+        if(!p->alarm_goingoff){//确保没有时钟正在运行
+          p->alarm_ticks = p->alarm_interval;
+          //jump to execuate alarm_handler
+          *p->alarm_trapframe = *p->trapframe;//backup trapframe
+          p->trapframe->epc = (uint64)p->alarm_handler;
+          p->alarm_goingoff = 1;
+        }
+        //如果一个时钟到期的时候已经有一个时钟处理函数正在运行，则会推迟到原处理函数运行完成后的下一个tick才触发这次时钟
+      }
+    }
+    yield();
+  }  
+
+  usertrapret();//最后usertrap调用了一个函数usertrapret
 }
 
 //
@@ -89,15 +109,16 @@ usertrap(void)
 void
 usertrapret(void)
 {
-  struct proc *p = myproc();
+  struct proc *p = myproc();//调用myproc函数来得到之前运行的是什么进程；myproc函数会查找一个根据当前CPU核的编号索引的数组
 
   // we're about to switch the destination of traps from
   // kerneltrap() to usertrap(), so turn off interrupts until
   // we're back in user space, where usertrap() is correct.
-  intr_off();
+  intr_off();//关闭中断，关闭中断是因为将要更新STVEC寄存器来指向用户空间的trap处理代码，此时仍然在内核中执行代码
+  //如果这时发生一个中断，那么程序执行会走向用户空间的trap处理代码，会导致内核出错
 
   // send syscalls, interrupts, and exceptions to trampoline.S
-  w_stvec(TRAMPOLINE + (uservec - trampoline));
+  w_stvec(TRAMPOLINE + (uservec - trampoline));//设置STVEC寄存器指向trampoline代码，在那里最终执行sret指令回到用户空间
 
   // set up trapframe values that uservec will need when
   // the process next re-enters the kernel.
@@ -124,8 +145,8 @@ usertrapret(void)
   // jump to trampoline.S at the top of memory, which 
   // switches to the user page table, restores user registers,
   // and switches to user mode with sret.
-  uint64 fn = TRAMPOLINE + (userret - trampoline);
-  ((void (*)(uint64,uint64))fn)(TRAPFRAME, satp);
+  uint64 fn = TRAMPOLINE + (userret - trampoline);//计算出将要跳转到汇编代码的地址
+  ((void (*)(uint64,uint64))fn)(TRAPFRAME, satp);//执行uerret函数，两个参数存储在a0,a1寄存器中
 }
 
 // interrupts and exceptions from kernel code go here via kernelvec,
@@ -218,3 +239,21 @@ devintr()
   }
 }
 
+int 
+sigalarm(int ticks, void(*handler)()){
+  //设置myproc中的相关属性
+  struct proc *p = myproc();
+  p->alarm_interval = ticks;
+  p->alarm_handler = handler;
+  p->alarm_ticks = ticks;
+  return 0;
+}
+
+int 
+sigreturn(){
+  //将trapframe恢复到时钟中断之前的状态，恢复原本正在执行的程序流
+  struct proc *p = myproc();
+  *p->trapframe = *p->alarm_trapframe;
+  p->alarm_goingoff = 0;
+  return 0;
+}

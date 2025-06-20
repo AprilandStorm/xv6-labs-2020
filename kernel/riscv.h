@@ -319,6 +319,15 @@ sfence_vma()
   asm volatile("sfence.vma zero, zero");
 }
 
+//receive fp 
+static inline uint64 //内联函数,编译器可能直接展开，不生成函数调用，返回一个64位整数
+r_fp()//read frame pointer
+{
+  uint64 x;
+  asm volatile("mv %0, s0" : "=r"(x));//汇编语言 将寄存器s0的值移动到另一个寄存器中;s0是RISCV中约定的帧指针寄存器；volatile表示不能优化
+  return x;
+}
+
 
 #define PGSIZE 4096 // bytes per page
 #define PGSHIFT 12  // bits of offset within a page
