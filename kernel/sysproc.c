@@ -44,11 +44,14 @@ sys_sbrk(void)
   int addr;
   int n;
 
+  struct proc *p = myproc();//获取当前CPU正在运行的进程，并将其指针保存在变量p中
+
   if(argint(0, &n) < 0)
     return -1;
-  addr = myproc()->sz;
-  if(growproc(n) < 0)
-    return -1;
+  addr = p->sz;
+  if(n < 0)
+    uvmdealloc(p->pagetable, p->sz, p->sz+n);//如果是缩小空间，则马上释放
+  p->sz += n;//懒分配
   return addr;
 }
 
