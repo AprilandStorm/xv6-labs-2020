@@ -30,7 +30,15 @@ barrier()
   // Block until all threads have called barrier() and
   // then increment bstate.round.
   //
-  
+  pthread_mutex_lock(&bstate.barrier_mutex);//对共享状态 bstate 加锁，防止并发修改
+  if(++bstate.nthread < nthread){
+    pthread_cond_wait(&bstate.barrier_cond, &bstate.barrier_mutex);
+  }else{
+    bstate.nthread = 0;//重置线程计数器 nthread = 0
+    bstate.round++;//增加当前同步轮数 round++，表示大家可以进入下一轮
+    pthread_cond_broadcast(&bstate.barrier_cond);//唤醒所有等待的线程（broadcast 而非 signal，因为多个线程在等待）
+  }
+  pthread_mutex_unlock(&bstate.barrier_mutex);
 }
 
 static void *
@@ -44,7 +52,9 @@ thread(void *xa)
     int t = bstate.round;
     assert (i == t);
     barrier();
-    usleep(random() % 100);
+    usleep(random() % 100);//模拟一些不确定的计算/IO延迟；增加线程执行的异步性，测试 barrier 的健壮性。
+
+
   }
 
   return 0;
