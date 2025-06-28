@@ -11,7 +11,7 @@ void
 main()
 {
   if(cpuid() == 0){
-    consoleinit();
+    consoleinit();//第一个外设是console,这是print的输出位置
     printfinit();
     printf("\n");
     printf("xv6 kernel is booting\n");
@@ -22,7 +22,7 @@ main()
     procinit();      // process table
     trapinit();      // trap vectors
     trapinithart();  // install kernel trap vector
-    plicinit();      // set up interrupt controller
+    plicinit();      // set up interrupt controller；由于中断不能被CPU感知，所以要对PLIC编程
     plicinithart();  // ask PLIC for device interrupts
     binit();         // buffer cache
     iinit();         // inode cache

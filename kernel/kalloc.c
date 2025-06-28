@@ -69,7 +69,8 @@ kfree(void *pa)
     memset(pa, 1, PGSIZE);
   
     r = (struct run*)pa;
-  
+    
+    //将释放的page存放于freelist中
     acquire(&kmem.lock);
     r->next = kmem.freelist;
     kmem.freelist = r;

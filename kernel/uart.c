@@ -50,13 +50,13 @@ extern volatile int panicked; // from printf.c
 void uartstart();
 
 void
-uartinit(void)
+uartinit(void)//配置好UART芯片使其可以被使用
 {
   // disable interrupts.
-  WriteReg(IER, 0x00);
+  WriteReg(IER, 0x00);//先关闭中断
 
   // special mode to set baud rate.
-  WriteReg(LCR, LCR_BAUD_LATCH);
+  WriteReg(LCR, LCR_BAUD_LATCH);//设置波特率，串口线的传输速率
 
   // LSB for baud rate of 38.4K.
   WriteReg(0, 0x03);
@@ -72,7 +72,7 @@ uartinit(void)
   WriteReg(FCR, FCR_FIFO_ENABLE | FCR_FIFO_CLEAR);
 
   // enable transmit and receive interrupts.
-  WriteReg(IER, IER_TX_ENABLE | IER_RX_ENABLE);
+  WriteReg(IER, IER_TX_ENABLE | IER_RX_ENABLE);//重新打开中断
 
   initlock(&uart_tx_lock, "uart");
 }
@@ -84,25 +84,25 @@ uartinit(void)
 // from interrupts; it's only suitable for use
 // by write().
 void
-uartputc(int c)
+uartputc(int c)//用于将一个字符放入串口输出缓冲区，并确保最终能够输出到串口设备
 {
-  acquire(&uart_tx_lock);
+  acquire(&uart_tx_lock);//获取锁
 
-  if(panicked){
+  if(panicked){//如果系统发生panic,直接死循环，阻止继续输出
     for(;;)
       ;
   }
 
   while(1){
-    if(((uart_tx_w + 1) % UART_TX_BUF_SIZE) == uart_tx_r){
+    if(((uart_tx_w + 1) % UART_TX_BUF_SIZE) == uart_tx_r){//缓冲区已满
       // buffer is full.
       // wait for uartstart() to open up space in the buffer.
-      sleep(&uart_tx_r, &uart_tx_lock);
+      sleep(&uart_tx_r, &uart_tx_lock);//uart_tx_r读指针变化即表示空间释放；sleep会先释放锁，行李啊重新获取；这样做是为了避免死锁，写线程在缓冲区满时必须让出CPU，让读方唤醒它。
     } else {
-      uart_tx_buf[uart_tx_w] = c;
-      uart_tx_w = (uart_tx_w + 1) % UART_TX_BUF_SIZE;
-      uartstart();
-      release(&uart_tx_lock);
+      uart_tx_buf[uart_tx_w] = c;//把字符c写入输出缓冲区的当前写入位置
+      uart_tx_w = (uart_tx_w + 1) % UART_TX_BUF_SIZE;//写指针前进以为
+      uartstart();//调用驱动函数，尝试把缓冲区中的数据发送到UART硬件寄存器
+      release(&uart_tx_lock);//释放锁
       return;
     }
   }
@@ -181,14 +181,14 @@ uartintr(void)
 {
   // read and process incoming characters.
   while(1){
-    int c = uartgetc();
+    int c = uartgetc();//从串口硬件读取数据
     if(c == -1)
       break;
-    consoleintr(c);
+    consoleintr(c);//交给控制台层处理（放入输入缓冲区）
   }
 
   // send buffered characters.
   acquire(&uart_tx_lock);
-  uartstart();
+  uartstart();//将shell存储在buffer中的任意字符送出
   release(&uart_tx_lock);
 }

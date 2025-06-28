@@ -12,12 +12,12 @@ void
 plicinit(void)
 {
   // set desired IRQ priorities non-zero (otherwise disabled).
-  *(uint32*)(PLIC + UART0_IRQ*4) = 1;
-  *(uint32*)(PLIC + VIRTIO0_IRQ*4) = 1;
+  *(uint32*)(PLIC + UART0_IRQ*4) = 1;//使能了uart的中断，就是设置PLIC会接收哪些中断，进而将中断路由到CPU
+  *(uint32*)(PLIC + VIRTIO0_IRQ*4) = 1;//设置PLIC接收来自IO磁盘的中断
 }
 
 void
-plicinithart(void)
+plicinithart(void)//由0号CPU运行，之后，每个cpu核都需要调用plicinithart函数表明对于哪些外设中断感兴趣
 {
   int hart = cpuid();
   
@@ -33,7 +33,7 @@ int
 plic_claim(void)
 {
   int hart = cpuid();
-  int irq = *(uint32*)PLIC_SCLAIM(hart);
+  int irq = *(uint32*)PLIC_SCLAIM(hart);// 读取 PLIC 的 claim 寄存器，获取当前中断号
   return irq;
 }
 

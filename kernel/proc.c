@@ -454,15 +454,15 @@ wait(uint64 addr)
 //  - eventually that process transfers control
 //    via swtch back to the scheduler.
 void
-scheduler(void)
+scheduler(void)//运行在每个CPU上，用于不断从proc[]表中选出可运行的进程并切换过去执行
 {
   struct proc *p;
   struct cpu *c = mycpu();
   
-  c->proc = 0;
+  c->proc = 0;//当前没有进程正在此CPU上运行
   for(;;){
     // Avoid deadlock by ensuring that devices can interrupt.
-    intr_on();
+    intr_on();//打开中断，否则可能导致时钟中断等无法触发
     
     int nproc = 0;
     for(p = proc; p < &proc[NPROC]; p++) {
@@ -475,18 +475,18 @@ scheduler(void)
         // to release its lock and then reacquire it
         // before jumping back to us.
         p->state = RUNNING;
-        c->proc = p;
-        swtch(&c->context, &p->context);
+        c->proc = p;//把该进程记录当前CPU正在执行的进程
+        swtch(&c->context, &p->context);//swtch是汇编实现的上下文切换函数，保存当前CPU上的上下文到c->context,恢复进程p上次保存的上下文，从它上次暂停的地方继续执行
 
         // Process is done running for now.
         // It should have changed its p->state before coming back.
-        c->proc = 0;
+        c->proc = 0;//清空当前CPU的proc
       }
-      release(&p->lock);
+      release(&p->lock);//释放锁
     }
     if(nproc <= 2) {   // only init and sh exist
-      intr_on();
-      asm volatile("wfi");
+      intr_on();//设置SSTATUS寄存器，打开中断标志位
+      asm volatile("wfi");//"Wait For Interrupt" ——节能等待硬件中断到来（如时钟）
     }
   }
 }
@@ -499,23 +499,23 @@ scheduler(void)
 // break in the few places where a lock is held but
 // there's no process.
 void
-sched(void)
+sched(void)//把当前进程切出CPU，并恢复CPU所属的调度器上下文，让内核可以选择运行另一个进程
 {
-  int intena;
+  int intena;//用于保存当前CPU的中断使能标志状态，以便后续恢复
   struct proc *p = myproc();
 
-  if(!holding(&p->lock))
+  if(!holding(&p->lock))//如果没有持有自己的锁，报错
     panic("sched p->lock");
-  if(mycpu()->noff != 1)
+  if(mycpu()->noff != 1)//noff是记录 push_off 层数的计数器
     panic("sched locks");
   if(p->state == RUNNING)
     panic("sched running");
-  if(intr_get())
+  if(intr_get())//如果中断没有禁用，报错
     panic("sched interruptible");
 
-  intena = mycpu()->intena;
+  intena = mycpu()->intena;//保存当前CPU的中断使能状态
   swtch(&p->context, &mycpu()->context);
-  mycpu()->intena = intena;
+  mycpu()->intena = intena;//恢复中断使能标志
 }
 
 // Give up the CPU for one scheduling round.

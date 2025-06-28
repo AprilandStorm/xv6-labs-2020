@@ -183,11 +183,11 @@ devintr()
   uint64 scause = r_scause();
 
   if((scause & 0x8000000000000000L) &&
-     (scause & 0xff) == 9){
+     (scause & 0xff) == 9){//检查scause的第63位是否为1（1代表中断）；再检查低8位是否为9，9代表外部中断
     // this is a supervisor external interrupt, via PLIC.
 
     // irq indicates which device interrupted.
-    int irq = plic_claim();
+    int irq = plic_claim();//调用plic_claim()来获取中断
 
     if(irq == UART0_IRQ){
       uartintr();

@@ -19,27 +19,27 @@ initlock(struct spinlock *lk, char *name)
 // Acquire the lock.
 // Loops (spins) until the lock is acquired.
 void
-acquire(struct spinlock *lk)
+acquire(struct spinlock *lk)//lk是指向一个自旋锁对象的指针
 {
   push_off(); // disable interrupts to avoid deadlock.
-  if(holding(lk))
+  if(holding(lk))//如果之前加过锁，则panic
     panic("acquire");
 
   // On RISC-V, sync_lock_test_and_set turns into an atomic swap:
   //   a5 = 1
   //   s1 = &lk->locked
   //   amoswap.w.aq a5, a5, (s1)
-  while(__sync_lock_test_and_set(&lk->locked, 1) != 0)
+  while(__sync_lock_test_and_set(&lk->locked, 1) != 0)//返回旧值，同时将值设置为1；如果旧值为0，说明加锁成功，退出循环；如果旧值为1，说明有别的CPU已经加锁，继续自旋
     ;
 
   // Tell the C compiler and the processor to not move loads or stores
   // past this point, to ensure that the critical section's memory
   // references happen strictly after the lock is acquired.
   // On RISC-V, this emits a fence instruction.
-  __sync_synchronize();
+  __sync_synchronize();//内存屏障，禁止CPU和编译器对临界区内的内存访问进行重排序，保证所有之后对共享内存的访问，一定发生在锁加成功之后；编译成fence指令
 
   // Record info about lock acquisition for holding() and debugging.
-  lk->cpu = mycpu();
+  lk->cpu = mycpu();//记录下当前持有锁的CPU；为了支持调试或运行时判断holding（）；在释放锁时会清掉这个字段
 }
 
 // Release the lock.
@@ -66,9 +66,9 @@ release(struct spinlock *lk)
   // On RISC-V, sync_lock_release turns into an atomic swap:
   //   s1 = &lk->locked
   //   amoswap.w zero, zero, (s1)
-  __sync_lock_release(&lk->locked);
+  __sync_lock_release(&lk->locked);//原子解锁
 
-  pop_off();
+  pop_off();//恢复中断状态
 }
 
 // Check whether this cpu is holding the lock.

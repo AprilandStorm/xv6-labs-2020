@@ -17,36 +17,37 @@ uint64 mscratch0[NCPU * 32];
 extern void timervec();
 
 // entry.S jumps here in machine mode on stack0.
+//系统启动代码，从machine模式切换到supervisor模式的初始化操作
 void
 start()
 {
   // set M Previous Privilege mode to Supervisor, for mret.
-  unsigned long x = r_mstatus();
-  x &= ~MSTATUS_MPP_MASK;
-  x |= MSTATUS_MPP_S;
-  w_mstatus(x);
+  unsigned long x = r_mstatus();//读取mstatus(machine status)寄存器
+  x &= ~MSTATUS_MPP_MASK;//将特权级（MPP）的位取消MACHINE模式
+  x |= MSTATUS_MPP_S;//将特权级切换为S模式
+  w_mstatus(x);//写入mstatus寄存器
 
   // set M Exception Program Counter to main, for mret.
   // requires gcc -mcmodel=medany
   w_mepc((uint64)main);
 
   // disable paging for now.
-  w_satp(0);
+  w_satp(0);//禁用分页机制，satp是S模式的地址转换和保护寄存器。使用物理地址访问内存
 
   // delegate all interrupts and exceptions to supervisor mode.
-  w_medeleg(0xffff);
-  w_mideleg(0xffff);
-  w_sie(r_sie() | SIE_SEIE | SIE_STIE | SIE_SSIE);
+  w_medeleg(0xffff);//异常委托寄存器， 0xffff表示所有16个异常/中断委托出去
+  w_mideleg(0xffff);//中断委托寄存器
+  w_sie(r_sie() | SIE_SEIE | SIE_STIE | SIE_SSIE);//SIE接收External,软件和定时器中断
 
   // ask for clock interrupts.
-  timerinit();
+  timerinit();//初始化定时器
 
   // keep each CPU's hartid in its tp register, for cpuid().
-  int id = r_mhartid();
-  w_tp(id);
+  int id = r_mhartid();//读取当前CPU的hart ID
+  w_tp(id);//将ID写入tp(线程指针)寄存器，为cpuid()提供hart ID
 
   // switch to supervisor mode and jump to main().
-  asm volatile("mret");
+  asm volatile("mret");//跳转到main
 }
 
 // set up to receive timer interrupts in machine mode,

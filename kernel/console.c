@@ -183,9 +183,9 @@ consoleintr(int c)
 void
 consoleinit(void)
 {
-  initlock(&cons.lock, "cons");
+  initlock(&cons.lock, "cons");//初始化锁
 
-  uartinit();
+  uartinit();//配置好uart芯片使其可以被使用，运行完这个中断后，原则上UART就可以生成中断了
 
   // connect read and write system calls
   // to consoleread and consolewrite.
