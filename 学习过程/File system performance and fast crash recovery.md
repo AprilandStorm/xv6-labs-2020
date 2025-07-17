@@ -1,4 +1,37 @@
 # File system performance and fast crash recovery
+
+## Q&A
+- 有没有可能使用一个descriptor block管理两个transaction？是不是只能一个transaction结束了才能开始下一个transaction？\
+答：Log中会有多个transaction，但是的确一个时间只有一个正在进行的transaction。当前正在进行的transaction对应的是正在执行写操作的系统调用。所以当前正在进行的transaction只存在于内存中，对应的系统调用只会更新cache中的block，也就是内存中的文件系统block。当ext3决定结束当前正在进行的transaction，它会做两件事情：首先开始一个新的transaction，这将会是下一个transaction；其次将刚刚完成的transaction写入到磁盘中，这可能要花一点时间。所以完整的故事是，磁盘上的log分区有一系列旧的transaction，这些transaction已经commit了，除此之外，还有一个位于内存的正在进行的transaction。在磁盘上的transaction，只能以log记录的形式存在，并且还没有写到对应的文件系统block中。logging系统在后台会从最早的transaction开始，将transaction中的data block写入到对应的文件系统中。当整个transaction的data block都写完了，之后logging系统才能释放并重用log中的空间。所以log其实是个循环的数据结构，如果用到了log的最后，logging系统会从log的最开始位置重新使用。
+- 有关batching，XV6不是也支持多个系统调用同时执行start_op和end_op，然后再一起commit吗？\
+答：是的，XV6具备有限能力的batching。
+- 如果一个block cache正在被更新，而这个block又正在被写入到磁盘的过程中，会怎样呢？\
+答：这的确会是一个问题，这里有个潜在的困难点，因为transaction写入到log中的内容只能包含由该transaction中的系统调用所做的更新，而不能包含在该transaction之后的系统调用的更新。因为如果这么做了的话，那么可能log中会只包含系统调用的部分更新，而我们需要确保transaction包含系统调用的所有更新。所以我们不能承担transaction包含任何在该transaction之后的更新的风险。\
+ext3是这样解决这个问题的，当它决定结束当前的open transaction时，它会在内存中拷贝所有相关的block，之后transaction的commit是基于这些block的拷贝进行的。所以transaction会有属于自己的block的拷贝。为了保证这里的效率，操作系统会使用copy-on-write（注，详见8.4）来避免不必要的拷贝，这样只有当对应的block在后面的transaction中被更新了，它在内存中才会实际被拷贝。
+- 你刚刚说没有进程会等待这些步骤完成，那么这些步骤是在哪里完成的呢？指的是ext3 transaction commit的过程。\
+答：这些是在后台的内核线程完成的。
+- 我有个有关重用log空间的问题，假设我们使用了一段特定的log空间，并且这段log空间占据了是刚刚释放出来的所有log空间，但是还不够，那么文件系统会等待另一部分的log空间释放出来吗，还是会做点别的？\
+答：是的，会等待。我们可以认为log是磁盘中的一段线性空间。如果需要写入的数据足够多，并且log迅速的用光了。我们甚至都不能在释放log空间之前开始新的系统调用。如果你们关注细节的话，这里会有一些潜在的死锁。首先系统调用需要预声明需要多少个block，这样logging系统才知道对于该transaction需要多少log空间，因为我们不会在没有足够空间来commit transaction时，开始一个新的transaction
+- XV6相比这里的log机制，缺少了什么呢？\
+答：：XV6主要缺失的是在log中包含多个transaction的能力，在XV6的log中最多只会有一个transaction，所以在XV6中缺少了并发的能力。比如说当我在执行transaction T7的系统调用时，ext3可以同时向磁盘提交T6，而这在XV6中这是不可能的，因为log只保存了一个transaction。所以我们必须先完成一个transaction的所有工作，之后才能开始下一个transaction。所以XV6是简单且正确的，但是缺少了并发的能力。
+- 但是在XV6我还是可以有多个transaction，只是说不能异步的执行它们，对吗？\
+答：这里其实有点模糊，XV6实际上允许在一个transaction中包含多个系统调用（注，详见15.8），所以XV6有一些并发和batching的能力，但是当XV6决定要commit一个transaction时，在完全完成这个transaction之前，是不能执行任何新的系统调用的。因为直到前一个transaction完全完成，并没有log空间来存放新的系统调用。所以XV6要么是在运行一些系统调用，要么是在commit transaction，但是它不能同时干这两件事情，而ext3可以同时干这两件事情。
+- 当你关闭一个open transaction时，具体会发生什么呢？会对当前的缓存做一个快照吗？\
+答：会的，当我们关闭一个transaction，文件系统会拷贝被transaction中的系统调用所修改的所有block，之后transaction才会commit这些block。后面的transaction会在真正的block cache上运行。当将block都commit到log之后，对于block cache的拷贝就可以丢弃了。
+- 你刚刚说有一个文件系统线程会做这里所有的工作，那么只能有一个这样的线程，否则的话就会有不同步的问题了，对吗？\
+答：或许真的只有一个线程，我其实不知道有多少个线程，但是1是个不错的数字，因为logging的正确性取决于旧的transaction要在新的transaction之前提交。但是逻辑上来说又没有必要只有一个线程，你可以想象不同的transaction使用不同的线程来提交（注，只要锁加的合适多个线程应该也是没问题的）。
+- 当你在讨论crash的时候，你有一个图是T8正在使用之前释放的T5的空间，如果T8在crash的时候还没有commit，并且T5的commit block正好在T8的descriptor block所指定的位置，这样会不会不正确的表明T8已经被commit了（注，这时T8有一个假的commit block）？\
+答：descriptor block和commit block都有transaction的序列号，所以T8的descriptor block里面的序列号是8，但是T5的commit block里面的序列号是5，所以两者不能匹配。
+- 我们可以在transaction T8开始的时候就知道它的大小吗？\
+答：这是个复杂的问题。当T8作为活跃的transaction开始时，系统调用会写入数据，这时文件系统并不知道T8有多大。当文件系统开始commit T8时，是知道T8有多大的，因为文件系统只会在T8中所有的系统调用都结束之后才commit它，而在那个时间点，文件系统知道所有的写操作，所以就知道T8究竟有多大。除此之外，descriptor block里面包含了所有block的实际编号，所以当写入transaction的第一个block，也就是descriptor block时，logging系统知道T8会包含多少个block。
+- 为什么不在descriptor block里面记录commit信息。虽然这样可能不太好，因为要回到之前的一个位置去更新之前的一个block。\
+答：所以这里的提议是，与其要一个专门的commit block，可以让descriptor block来实现commit block的功能。XV6与这个提议非常像，我认为可以这么做，至少在ext3中这么做了不会牺牲性能。你需要像XV6一样来组织这里的结构，也就是需要在descriptor block包含某个数据表明这是一个已经提交过的transaction。\
+这样做的话，可以节省一个commit block的空间，但是不能节省整个时间。Linux文件系统的后续版本实现了你的提议，ext4做了以下工作来更有效的写commit block。ext4会同时写入所有的data block和commit block，它并不是等待所有的data block写完了之后才写的commit block。但是这里有个问题，磁盘可以无序的执行写操作，所以磁盘可能会先写commit block之后再写data block。如果中间有了crash，那么我们有了commit block，但是却没有全部的data block。ext4通过在commit block中增加校验和来避免这种问题。所以commit block写入之后发生了crash，如果data block没有全写入那么校验和不能得出正确的结果，恢复软件可以据此判断出错了。ext4可以通过这种方式在机械硬盘上写入一批block而避免磁碟旋转，进而提升磁盘性能。
+- log中的data block是怎么写入到文件系统中的？\
+答：这个问题有多个答案。对于data block，ext3有三种模式，但是我只记得两个，journaled data和ordered data（注，第三种是writeback）。当你在配置ext3文件系统时，你需要告诉Linux你想要哪种模式。如果你想要的是journaled data，文件内容就是写入到log中，如果你向一个文件写数据，这会导致inode更新，log中会包含文件数据和更新了的inode，也就是说任何更新了的block都会记录在log中。这种方法非常慢，因为数据需要先写在log中，再写到文件系统中。所以journaled data很直观，但是很慢。\
+ordered data是最流行的模式，它不会将文件数据写入到log中，只会将metadata block，例如inode，目录block，写入到log中，文件的内容会直接写到文件系统的实际位置中。所以这种模式要快得多，因为你不用将文件内容写两次。但是它也会导致更多的复杂性，因为你不能随时写入文件内容。假设你执行一个写操作导致一个新的block被分配给一个文件，并将包含了新分配block编号的inode写入到log中并commit，在实际写入文件内容至刚刚分配的data block之前发生crash。在稍后的恢复流程中，你将会看到包含了新分配的block编号的inode，但是对应data block里面的内容却属于之前使用了这个data block的旧的文件。如果你运行的是一个类似Athena的多用户系统，那么可能就是一个用户拥有一个文件，其中的内容又属于另一个用户已经删除的文件，如果我们不是非常小心的处理写入数据和inode的顺序就会有这样的问题。\
+ext3的ordered data通过先写入文件内容到磁盘中，再commit修改了的inode来解决这里的问题。如果你是个应用程序，你写了一个文件并导致一个新的文件系统data block被分配出来，文件系统会将新的文件内容写到新分配的data block中，之后才会commit transaction，进而导致inode更新并包含新分配的data block编号。如果在写文件数据和更新inode之间发生了crash，你也看不到其他人的旧的数据，因为这时就算有了更新了的data block，但是也没关系，因为现在不仅inode没有更新，连bitmap block也没更新，相应的data block还处于空闲状态，并且可以分配给其他的程序，你并不会因此丢失block。这里的效果就是我们写了一个data block但是最终并没有被任何文件所使用。
+
 ##  Why logging
 - 这节课讲的是Linux中的广泛使用的ext3文件系统所使用的logging系统，同时我们也会讨论在高性能文件系统中添加log需要面对的一些问题
 - 为什么要学习logging
@@ -41,5 +74,91 @@
   2. 会有bitmap block来表明每个data block是被分配的还是空闲的
   3. 在磁盘的一个指定区域，会保存log
 - 主要的区别在于ext3可以同时跟踪多个在不同执行阶段的transaction
-- ext3的log:
-  1. 在log的最开始，是super block。这是log的super block，而不是文件系统的super block。log的super block包含了log中第一个有效的transaction的起始位置和序列号
+### ext3的log:
+- 在log的最开始，是super block。这是log的super block，而不是文件系统的super block。log的super block包含了log中第一个有效的transaction的起始位置和序列号
+- log中，除了super block以外的block存储了transaction。每个transaction在log中包含了：
+   1. 一个descriptor block，其中包含了log数据对应的实际block编号，这与XV6中的header block很像。
+   2. 之后是针对每一个block编号的更新数据。
+   3. 最后当一个transaction完成并commit了，会有一个commit block
+- 因为log中可能有多个transaction，commit block之后可能会跟着下一个transaction的descriptor block，data block和commit block。所以log可能会很长并包含多个transaction。
+- 我们可以认为super block中的起始位置和序列号属于最早的，排名最靠前的，并且是有效的transaction。
+- 在crash之后的恢复过程会扫描log，为了将descriptor block和commit block与data block区分开，descriptor block和commit block会以一个32bit的魔法数字作为起始。
+
+## ext3如何提升性能
+### ext3通过3种方式提升了性能
+- 首先，它提供了异步的（asynchronous）系统调用，也就是说系统调用在写入到磁盘之前就返回了，系统调用只会更新缓存在内存中的block，并不用等待写磁盘操作。
+- 它提供了批量执行（batching）的能力，可以将多个系统调用打包成一个transaction。
+- 它提供了并发（concurrency）。
+### 异步的系统调用
+- 这表示系统调用修改完位于缓存中的block之后就返回，并不会触发写磁盘。所以这里明显的优势就是系统调用能够快速的返回。
+- 同时它也使得I/O可以并行的运行，也就是说应用程序可以调用一些文件系统的系统调用，但是应用程序可以很快从系统调用中返回并继续运算，与此同时文件系统在后台会并行的完成之前的系统调用所要求的写磁盘操作。这被称为I/O concurrency，如果没有异步系统调用，很难获得I/O concurrency，或者说很难同时进行磁盘操作和应用程序运算，因为同步系统调用中，应用程序总是要等待磁盘操作结束才能从系统调用中返回。
+- 另一个异步系统调用带来的好处是，它使得大量的批量执行变得容易。
+- 异步系统调用的缺点是系统调用的返回并不能表示系统调用应该完成的工作实际完成了。
+- 文件系统对于这类应用程序也提供了一些工具以确保在crash之后可以有预期的结果。这里的工具是一个系统调用，叫做fsync，所有的UNIX都有这个系统调用。这个系统调用接收一个文件描述符作为参数，它会告诉文件系统去完成所有的与该文件相关的写磁盘操作，在所有的数据都确认写入到磁盘之后，fsync才会返回。
+### 批量执行（batching）
+- 在任何时候，ext3只会有一个open transaction。ext3中的一个transaction可以包含多个不同的系统调用。
+- 所以ext3是这么工作的：
+  1. 宣告要开始一个新的transaction，接下来的几秒所有的系统调用都是这个大的transaction的一部分
+  2. 认为默认情况下，ext3每5秒钟都会创建一个新的transaction，所以每个transaction都会包含5秒钟内的系统调用，这些系统调用都打包在一个transaction中。
+  3. 在5秒钟结束的时候，ext3会commit这个包含了可能有数百个更新的大transaction。
+- 为什么这是个好的方案呢？
+  1. 它在多个系统调用之间分摊了transaction带来的固有的损耗。固有的损耗包括写transaction的descriptor block和commit block；在一个机械硬盘中需要查找log的位置并等待磁碟旋转，这些都是成本很高的操作，现在只需要对一批系统调用执行一次，而不用对每个系统调用执行一次这些操作，所以batching可以降低这些损耗带来的影响。
+  2. 它可以更容易触发write absorption。通过batching，多次更新同一组block会先快速的在内存的block cache中完成，之后在transaction结束时，一次性的写入磁盘的log中。这被称为write absorption，相比一个类似于XV6的同步文件系统，它可以极大的减少写磁盘的总时间。
+  3. disk scheduling。不论是在机械硬盘还是SSD（机械硬盘效果会更好），一次性的向磁盘的连续位置写入1000个block，要比分1000次每次写一个不同位置的磁盘block快得多。
+### concurrency
+- 相比XV6这里包含了两种concurrency
+  1. 首先ext3允许多个系统调用同时执行，所以我们可以有并行执行的多个不同的系统调用。在XV6中，如果当前的transaction还没有完成，新的系统调用不能继续执行。而在ext3中，大多数时候多个系统调用都可以更改当前正在进行的transaction。
+  2. 可以有多个不同状态的transaction同时存在。所以尽管只有一个open transaction可以接收系统调用，但是其他之前的transaction可以并行的写磁盘。这里可以并行存在的不同transaction状态包括了：
+首先是一个open transaction；若干个正在commit到log的transaction，我们并不需要等待这些transaction结束；若干个正在从cache中向文件系统block写数据的transaction；若干个正在被释放的transaction，这个并不占用太多的工作
+
+## ext3文件系统调用格式
+- 在Linux的文件系统中，我们需要每个系统调用都声明一系列写操作的开始和结束。
+- 实际上在任何transaction系统中，都需要明确的表示开始和结束，这样之间的所有内容都是原子的。
+- 每个系统调用在调用了start函数之后，会得到一个handle，它某种程度上唯一识别了当前系统调用。当前系统调用的所有写操作都是通过这个handle来识别跟踪的
+- 之后系统调用需要读写block，它可以通过get获取block在buffer中的缓存，同时告诉handle这个block需要被读或者被写。
+- 当这个系统调用结束时，它会调用stop函数，并将handle作为参数传入。
+- 除非transaction中所有已经开始的系统调用都完成了，transaction是不能commit的。
+- 因为可能有多个transaction，文件系统需要有种方式能够记住系统调用属于哪个transaction，这样当系统调用结束时，文件系统就知道这是哪个transaction正在等待的系统调用，所以handle需要作为参数传递给stop函数
+- stop函数并不会导致transaction的commit，它只是告诉logging系统，当前的transaction少了一个正在进行的系统调用。transaction只能在所有已经开始了的系统调用都执行了stop之后才能commit。
+
+## ext3 transaction commit步骤
+1. 首先需要阻止新的系统调用.这实际上会损害性能，因为在这段时间内系统调用需要等待并且不能执行。
+2. 需要等待包含在transaction中的已经开始了的系统调用们结束。
+3. 一旦transaction中的所有系统调用都完成了，也就是完成了更新cache中的数据，那么就可以开始一个新的transaction，并且让在第一步中等待的系统调用继续执行。
+4. transaction中包含的所有的系统调用所修改的block，因为系统调用在调用get函数时都将handle作为参数传入，表明了block对应哪个transaction。接下来我们可以更新descriptor block，其中包含了所有在transaction中被修改了的block编号。
+5. 还需要将被修改了的block，从缓存中写入到磁盘的log中.在这个阶段，我们写入到磁盘log中的是transaction结束时，对于相关block cache的拷贝
+6. 接下来，我们需要等待前两步中的写log结束。
+7. 之后我们可以写入commit block
+8. 接下来我们需要等待写commit block结束。从技术上来说，当前transaction已经到达了commit point，也就是说transaction中的写操作可以保证在面对crash并重启时还是可见的。如果crash发生在写commit block之前，那么transaction中的写操作在crash并重启时会丢失。
+9. 接下来我们可以将transaction包含的block写入到文件系统中的实际位置。
+10. 在第9步中的所有写操作完成之后，我们才能重用transaction对应的那部分log空间。
+- 在一个非常繁忙的系统中，log的头指针一直追着尾指针在跑（注，也就是说一直没有新的log空间）。不过人们通常会将log设置的足够大，让这种情况就不太可能发生。
+- 文件系统会记录每个transaction的大小，这样文件系统就知道要等待多少个之前的transaction结束。所以这里还有不少的记录工作，这样文件系统才能理解所有旧的transaction的状态。
+- 在log的最开始有一个super block，所以在任何时候log都是由一个super block和一些transaction组成。
+
+## ext3 file system恢复过程
+- 当决定释放某段log空间时，文件系统会更新super block（目前我的理解是指log的super block）中的指针将其指向当前最早的transaction的起始位置。
+- 之后如果crash并重启，恢复软件会读取super block，并找到log的起始位置。
+- 每个transaction包含了一个descriptor block，里面记录了该transaction中包含了多少个data block。假设descriptor block记录了17个block，那么恢复软件会扫描17个data block，最后是commit block。每个descriptor和commit block都以某个魔法数字作为起始，这是一个32bit的数字。所以如果扫描完了T8，下一个block以魔法数字作为起始，那么恢复软件就会认为这是一个descriptor block。（注，也有可能T5正好完美的跟在T8后面，也就是说T8的commit block之后就是T5的descriptor block，同时T5的commit block也存在，所以这里必然还需要一些其他的机制，我猜是用到了transaction的序列号）
+- 当它向log写一个block时，如果这个block既不是descriptor block也不是commit block，但是又以魔法数字作为起始，文件系统会以0替换前32bit，并在transaction的descriptor block中为该data block设置一个bit。这个bit表示，对应的data block本来是以魔法数字作为起始，但是现在我们将其替换成了0。而恢复软件会检查这个bit位，在将block写回到文件系统之前，会用魔法数字替换0。
+- 所以恢复软件会从super block指向的位置开始一直扫描，直到：
+  1. 某个commit block之后的一个block并不是descriptor block
+  2. 或者某个commit block之后是descriptor block，但是根据descriptor block找到的并不是一个commit block
+- 这时，恢复软件会停止扫描，并认为最后一个有效的commit block是log的结束位置。恢复软件会忽略未完成的transaction，因为这个transaction并没有包含所有的写操作，所以它并不能原子性的恢复。
+- 之后恢复软件会回到log的最开始位置，并将每个log block写入到文件系统的实际位置，直到走到最后一个有效的commit block。、
+- 之后才是启动剩下的操作系统，并且运行普通的程序。在恢复完成之前，是不能运行任何程序的，因为这个时候文件系统并不是有效的。
+
+## 为什么新transaction需要等前一个transaction中系统调用执行完成
+- 如果我们想要关闭T1，我们需要停止接收新的系统调用，因为我们想要等待现有的系统调用结束，这样才能commit transaction。
+- 所以直到这些系统调用都结束了，在ext3中不能允许开始任何新的系统调用。
+### 这里的问题是，直到T1中所有的系统调用都结束之前，ext3为什么不让T2中的系统调用开始执行呢？
+- T2对另一个文件y调用了unlink系统调用。unlink会释放与y关联的inode。
+- T2中修改的信息，被T1所使用了，这意味着我们丢失了T2的原子性。
+- 刚刚的例子中，因为T1使用了T2中释放的inode，这意味着T2中部分修改已经生效了，但是其他的修改随着crash又丢失了。
+- 或许你可以想到一些修复这里问题的方法，或许T1可以发现inode是由后一个transaction释放的而不去使用它。
+- 而ext3采用了一个非常简单的方法，在前一个transaction中所有系统调用都结束之前，它不允许任何新的系统调用执行。
+
+## 总结
+- log是为了保证多个步骤的写磁盘操作具备原子性。在发生crash时，要么这些写操作都发生，要么都不发生。这是logging的主要作用。
+- logging的正确性由write ahead rule来保证。write ahead rule的意思是，你必须在做任何实际修改之前，将所有的更新commit到log中。在稍后的恢复过程中完全依赖write ahead rule。
+- 最后有关ext3的一个细节点是，它使用了批量执行和并发来获得可观的性能提升，不过同时也带来了可观的复杂性的提升。
