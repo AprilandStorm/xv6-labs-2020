@@ -8,14 +8,12 @@
 之后，当我们得到了一个Page Fault，这意味着整个表单对应的地址中至少有一个Page没有被映射，虽然实际上我们一个Page都没有映射。现在我们得到了一个Page Fault，我们只需要映射一个Page，在这个Page中，我们会存入i，i+1。。。的平方根（注，因为一个Page4096字节，一个double8个字节，所以一个Page可以保存512个表单项）。因为这是第一个Page Fault，之前并没有映射了内存Page，所以不需要做任何事情。\
 之后，程序继续运行并且查找了表单中的更多项，如果查找一个没有位于已分配Page上的表单项时，会得到另一个Page Fault。这时，在handle_sigsegv会分配第二个内存Page，并为这个Page计算平方根的值。之后会munmap记录在last_page_base中的内存。\
 当然，在实际中我们永远也不会这么做，在实际中至少会保留一些内存Page，这里只是以一种极端的方式展示，你可以只通过内存中的一个Page来表示一个巨大的表单。所以在handle_sigsegv中，会释放上一次映射的内存Page。之后程序继续运行，所以在任何一个时间，只有一个物理内存Page被使用了。很明显，你们在实际中不会这么做，这里更多的是展示前面提到特性的能力。
-
-# Baker's Real-Time Copying Garbage Collector
-- Garbage Collector, GC是指编程语言替程序员完成内存释放，这样程序员就不用像在C语言中一样调用free来释放内存.
-- 对于拥有GC的编程语言，程序员只需要调用类似malloc的函数来申请内存，但是又不需要担心释放内存的过程。
-- GC会决定内存是否还在使用，如果内存并没有被使用，那么GC会释放内存。
-- 论文中讨论了一种特定的GC，这是一种copying GC。什么是copying GC？\
-Copying GC的基本思想是将仍然在使用的对象拷贝到to空间去，具体的流程是从根节点开始拷贝。每一个应用程序都会在一系列的寄存器或者位于stack上的变量中保存所有对象的根节点指针，通常来说会存在多个根节点，但是为了说明的简单，我们假设只有一个根节点。拷贝的流程会从根节点开始向下跟踪，所以最开始将根节点拷贝到了to空间，但是现在根节点中的指针还是指向着之前的对象。
-
+- 问：刚刚说到在Handler里面会扫描一个Page中的所有对象，但是对象怎么跟内存Page对应起来呢？\
+答：在最开始的时候，to空间是没有任何对象的。当需要forward的时候，我刚刚描述的是拷贝一个对象，但是实际上拷贝的是一个内存Page中的N个对象，这样它们可以填满整个Page。所以现在我们在to空间中，有N个对象位于一个Page中，并且它们都没有被扫描。之后某个时间，Page Fault Handler会被调用，GC会遍历这个内存Page上的N个对象，并检查它们的指针。对于这些指针，GC会将对应的对象拷贝到to空间的unscanned区域中。之后，当应用程序使用了这些未被扫描的对象，它会再次得到Page Fault，进而再扫描这些对象，以此类推。
+- 在完成了GC之后，会切换from和to空间吗？\
+答：最开始我们使用的是from空间，当用完了的时候，你会将对象拷贝到to空间，一旦完成了扫描，from空间也被完全清空了，你可以切换两个空间的名字。现在会使用to空间来完成内存分配。直到它也满了，你会再次切换。
+- GC和应用程序是不是有不同的Page Table？\
+答：不，它们拥有相同的Page Table。它们只是将物理内存映射到了地址空间的两个位置，也就是Page Table的两个位置。在一个位置，PTE被标记成invalid，在另一个位置，PTE被标记成可读写的。
 
 # 应用程序使用虚拟内存所需要的特性
 - 今天的话题是用户应用程序使用的虚拟内存，它主要是受这篇1991年的[论文](https://pdos.csail.mit.edu/6.828/2020/readings/appel-li.pdf)的启发。
@@ -100,3 +98,120 @@ handle_sigsegv函数与你们之前看过很多很多次的trap代码非常相�
   1. 它首先会获取触发Page Fault的地址
   2. 之后调用mmap对这个虚拟内存地址分配一个物理内存Page（注，这里是mmap映射匿名内存）。这里的虚拟内存地址就是我们想要在表单中用来保存数据的地址。
   3. 然后我们为这个Page中所有的表单项都计算对应的平方根值，之后就完事了。
+
+# Baker's Real-Time Copying Garbage Collector
+- Garbage Collector, GC是指编程语言替程序员完成内存释放，这样程序员就不用像在C语言中一样调用free来释放内存.
+- 对于拥有GC的编程语言，程序员只需要调用类似malloc的函数来申请内存，但是又不需要担心释放内存的过程。
+- GC会决定内存是否还在使用，如果内存并没有被使用，那么GC会释放内存。
+- 论文中讨论了一种特定的GC，这是一种copying GC。什么是copying GC？
+  1. opying GC的基本思想是将仍然在使用的对象拷贝到to空间去，具体的流程是 从根节点开始拷贝。每一个应用程序都会在一系列的寄存器或者位于stack上的变量中保存所有对象的根节点指针，通常来说会存在多个根节点，但是为了说明的简单，我们假设只有一个根节点。拷贝的流程会从根节点开始向下跟踪，所以最开始将根节点拷贝到了to空间，但是现在根节点中的指针还是指向着之前的对象。
+  2. 之后，GC会扫描根节点对象。
+  3. 接下来GC会将根节点对象中指针指向的对象也拷贝到to空间，很明显这些也是还在使用中的对象。当一个对象被拷贝到to空间时，根节点中的指针会被更新到指向拷贝到了to空间的对象。
+  4. 还会存储一些额外的信息来记住相应的对象已经保存在了to空间，这里会在from空间保留一个forwarding指针。这里将对象从from空间拷贝到to空间的过程称为forward。
+  5. 现在与根节点相关的对象都从from空间移到了to空间，并且所有的指针都被正确的更新了，所以现在我们就完成了GC，from空间的所有对象都可以被丢弃，并且from空间现在变成了空闲区域。
+- 论文中讨论的是一种更为复杂的GC算法，它被称为Baker算法，这是一种很老的算法。它的一个优势是它是实时的，这意味着它是一种incremental GC（注，incremental GC是指GC并不是一次做完，而是分批分步骤完成）。这里的基本思想是:
+  1. GC的过程没有必要停止程序的运行并将所有的对象都从from空间拷贝到to空间，然后再恢复程序的运行。
+  2. GC开始之后，唯一必要的事情，就是将根节点拷贝到to空间。所以现在根节点被拷贝了，但是根节点内的指针还是指向位于from空间的对象。根节点只是被拷贝了并没有被扫描，其中的指针还没有被更新。
+  3. 我们不应该跟踪from空间的指针（注，换言之GC时的指针跟踪都应该只在同一个空间中完成）。
+
+# 使用虚拟内存特性的GC
+- 如果拥有了前面提到的虚拟内存特性，你可以使用虚拟内存来减少指针检查的损耗，并且以几乎零成本的代价来并行运行GC。
+- 这里的基本思想是将heap内存中from和to空间，再做一次划分，每一个部分包含scanned，unscanned两个区域。
+- 在开始GC时，我们将根节点对象拷贝到to空间，但是根节点中的指针还是指向了位于from空间的对象。现在unscanned区域包括了所有的对象（注，现在只有根节点），我们会将unscanned区域的权限设置为None。这意味着，当开始GC之后，应用程序第一次使用根节点，它会得到Page Fault，因为这部分内存的权限为None。
+- 在Page Fault Handler中，GC需要扫描位于内存Page中所有的对象，然后将这些对象所指向的其他对象从from空间forward到to空间。
+- 之后，应用程序就可以访问特定的对象，因为我们将对象中的指针转换成了可以安全暴露给应用程序的指针（注，因为这些指针现在指向了位于to空间的对象），所以应用程序可以访问这些指针。
+- 这种方案的好处是，它仍然是递增的GC，因为每次只需要做一小部分GC的工作。除此之外，它还有额外的优势：现在不需要对指针做额外的检查了（注，也就是不需要查看指针是不是指向from空间，如果是的话，将其forward到to空间）。
+- 论文中提到使用虚拟内存的另一个好处是，它简化了GC的并发。GC现在可以遍历未被扫描的内存Page，并且一次扫描一个Page，同时可以确保应用程序不能访问这个内存Page，因为对于应用程序来说，未被扫描的内存Page权限为None。
+- 对于应用程序来说，unscanned区域中的Page权限为None。这就引出了另一个问题，GC怎么能访问这个区域的内存Page？因为对于应用程序来说，这些Page是inaccessible。这里的技巧是使用map2，将同一个物理内存映射两次，第一次是我们之前介绍的方式，也就是为应用程序进行映射，第二次专门为GC映射。在GC的视角中，我们仍然有from和to空间。在to空间的unscanned区域中，Page具有读写权限。
+
+# 使用虚拟内存特性的GC代码展示
+## 应用程序使用的API包括了new和readptr
+```
+struct elem* readptr(struct elem** ptr) ;
+struct elem* new();
+```
+- readptr会检查指针是否位于from空间，如果是的话，那么它指向的对象需要被拷贝。
+- 我有一个循环链表，并且有两个根节点，其中一个指向链表的头节点，另一个指向链表的尾节点。
+## 应用程序线程的工作是循环1000次，每次创建list，再检查list。
+```
+void* app_thread(void* x){
+  for(int i = 0; i < 1000; i++){
+      make_clist();
+      check_clist();
+  }
+}
+```
+- 所以它会产生大量的垃圾，因为每次make_clist完成之后，再次make_clist，上一个list就成为垃圾了。所以GC必然会有一些工作要做。
+## make_clist的代码
+```
+//这段代码创建了一个值为 0 到 LISTSZ-1 的循环链表（新节点插入头部，值递增），并每次插入后调用检查函数 check_clist()。
+void make_clist(void) {
+    struct elem *e;//定义了一个指向 struct elem 类型的指针 e，用于创建新的链表节点。
+    root_head = new();
+    readptr(&root_head)->val = 0;
+    readptr(&root_head)->next = readptr(&root_head);//设置该节点的 next 指针指向自己，构成一个单节点的循环链表。
+    root_last = readptr(&root_head);//将 root_last 也指向这个唯一的节点
+    for (int i = 1; i < LISTSZ; i++) {
+        e = new();
+        readptr(&e)->next = readptr(&root_head);
+        readptr(&e)->val = i;
+        root_head = readptr(&e);
+        readptr(&root_last)->next = readptr(&root_head);
+        check_clist(i+1);//每次插入一个新节点后，调用 check_clist(i+1) 来检查链表结构是否正确。
+    }
+
+```
+- 每个指针都需要被readptr检查包围
+- make_clist会构建一个LISTSZ大小的链表，分配新的元素，并将新元素加到链表的起始位置，之后更新链表尾指针指向链表新的起始位置，这样就能构成一个循环链表。
+## new()
+```
+struct elem *new(void) {
+    struct elem *n;
+
+    pthread_mutex_lock(&lock); // 互斥锁，保护共享内存分配资源
+
+    if (collecting && scanned < to_free_start) {
+        scan(scanned);                    // 扫描对象
+        if (scanned >= to_free_start) {
+            end_collecting();             // 如果扫描完了，就结束垃圾回收
+        }
+    }
+
+    if (to_free_start + sizeof(struct obj) >= to + SPACESZ) {
+        flip();                           // 到达当前分配区末尾，切换空间
+    }
+
+    n = (struct elem *) alloc();          // 分配新的元素
+    pthread_mutex_unlock(&lock);
+
+    return n;
+}
+
+```
+- 检查是否有足够的空间，如果有足够的空间，我们就将指针地址增加一些，以分配内存空间给新的对象，最后返回。如果没有足够的空间，我们需要调用flip，也就是运行GC.
+
+## flip()
+- 实现了垃圾回收（GC）中的空间翻转（flip()）函数，是标记-复制（mark-copy GC）算法的一部分，用于在“from-space”和“to-space”之间切换。
+```
+void flip() {
+    char *tmp = to;//临时变量 tmp 保存当前 to 空间指针
+    printf("flip spaces\n");
+    assert(!collecting);//确保当前不处于垃圾回收中（如果是，则说明出现了逻辑错误）
+    to = from;//to表示当前from空间
+    to_free_start = from;//表示当前GC分配的起点
+    from = tmp;//from表示原先的to空间
+    collecting = 1;//设置 collecting = 1 表示进入 GC 状态
+    scanned = to;//初始化扫描位置（下一步将扫描从 to 复制过去的对象）
+#ifdef VM//如果开启了虚拟内存支持（#ifdef VM）
+    if (mprotect(to, SPACESZ, PROT_NONE) < 0) {//将 to 空间设置为不可访问 (PROT_NONE)，让程序在错误访问时触发 page fault。
+        fprintf(stderr, "Couldn't unmap to space: %s\n", strerror(errno));
+        exit(EXIT_FAILURE);
+    }
+#endif
+    // move root_head and root_last to to-space
+    root_head = (struct elem *) forward((struct obj *)root_head);//把 root_head 从旧空间复制到新空间,forward() 函数会判断对象是否已经被复制，并返回新位置
+    root_last = (struct elem *) forward((struct obj *)root_last);//把  root_last 从旧空间复制到新空间
+    pthread_cond_broadcast(&cond);//完成翻转后，使用 pthread_cond_broadcast() 通知所有等待 GC 结束的线程
+}
+```
+- flip首先会切换from和to指针，之后将这个应用程序的两个根节点从from空间forward到to空间。
