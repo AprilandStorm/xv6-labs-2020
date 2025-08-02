@@ -193,21 +193,22 @@ static struct inode* iget(uint dev, uint inum);
 // Mark it as allocated by  giving it type type.
 // Returns an unlocked but allocated and referenced inode.
 struct inode*
-ialloc(uint dev, short type)
+ialloc(uint dev, short type)//dev: 设备号（通常是主设备号）;type: 要分配 inode 的类型（如 T_FILE，T_DIR);返回值：新分配并加载进内存的 struct inode *
 {
-  int inum;
-  struct buf *bp;
-  struct dinode *dip;
-
-  for(inum = 1; inum < sb.ninodes; inum++){
-    bp = bread(dev, IBLOCK(inum, sb));
-    dip = (struct dinode*)bp->data + inum%IPB;
+  int inum;//inum: inode 编号，从 1 开始；
+  struct buf *bp;//bp: 缓存的磁盘块，使用 buffer cache；
+  struct dinode *dip;//dip: 指向当前 inode 在磁盘中的表示（struct dinode）；
+ 
+  //主循环：寻找空闲 inode
+  for(inum = 1; inum < sb.ninodes; inum++){//sb 是 superblock，记录了 inode 总数；
+    bp = bread(dev, IBLOCK(inum, sb));//读取 inode 所在磁盘块;IBLOCK(inum, sb)：计算 inum 对应的磁盘块号；bread()：从磁盘读取该块到 buffer cache 中，返回 struct buf *；
+    dip = (struct dinode*)bp->data + inum%IPB;//获取第 inum 个 dinode（inode）
     if(dip->type == 0){  // a free inode
-      memset(dip, 0, sizeof(*dip));
+      memset(dip, 0, sizeof(*dip));//先把整个结构清零；
       dip->type = type;
-      log_write(bp);   // mark it allocated on the disk
-      brelse(bp);
-      return iget(dev, inum);
+      log_write(bp);   // mark it allocated on the disk;写入日志系统，标记修改
+      brelse(bp);//把 buffer 释放回缓存系统。
+      return iget(dev, inum);//iget() 会加载或获取该 inum 对应的内核态 struct inode*；
     }
     brelse(bp);
   }

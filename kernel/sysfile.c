@@ -238,18 +238,20 @@ bad:
   return -1;
 }
 
+//负责创建一个新文件或目录
 static struct inode*
 create(char *path, short type, short major, short minor)
-{
+{//path: 创建目标的路径（如 /a/b.txt）;type: 文件类型，可能是 T_FILE（普通文件）、T_DIR（目录）、T_DEVICE（设备）;major, minor: 如果是设备文件使用，用于设备号
   struct inode *ip, *dp;
   char name[DIRSIZ];
 
-  if((dp = nameiparent(path, name)) == 0)
-    return 0;
+  if((dp = nameiparent(path, name)) == 0)//nameiparent(path, name)：将 /a/b.txt 分解成父目录 inode（dp = /a），并将最后的名字部分 b.txt 赋值到 name
+    return 0;//如果路径非法或找不到父目录，返回失败。
 
-  ilock(dp);
-
-  if((ip = dirlookup(dp, name, 0)) != 0){
+  ilock(dp);// 加锁父目录 inode
+  
+  //检查是否已存在该名字的文件
+  if((ip = dirlookup(dp, name, 0)) != 0){//如果找到了：dp 的引用被释放；对已有 inode 加锁；如果是要创建普通文件，允许打开已有的普通文件或设备文件；
     iunlockput(dp);
     ilock(ip);
     if(type == T_FILE && (ip->type == T_FILE || ip->type == T_DEVICE))
@@ -257,25 +259,28 @@ create(char *path, short type, short major, short minor)
     iunlockput(ip);
     return 0;
   }
-
-  if((ip = ialloc(dp->dev, type)) == 0)
+  
+  //分配一个新 inode（物理磁盘上的空间）
+  if((ip = ialloc(dp->dev, type)) == 0)//ialloc() 在磁盘 inode 空闲表中找一个空闲项，分配为新文件；初始化类型为 type；
     panic("create: ialloc");
 
   ilock(ip);
-  ip->major = major;
-  ip->minor = minor;
-  ip->nlink = 1;
-  iupdate(ip);
+  ip->major = major;//设定设备号（用于设备文件）；
+  ip->minor = minor;//设定设备号（用于设备文件）；
+  ip->nlink = 1;//设置初始硬链接数为 1；
+  iupdate(ip);//调用 iupdate() 将 inode 的元数据写入磁盘。
 
+  //特殊处理目录类型
   if(type == T_DIR){  // Create . and .. entries.
-    dp->nlink++;  // for ".."
-    iupdate(dp);
+    dp->nlink++;  // for ".."使得父目录多了一个子链接
+    iupdate(dp);//把 dp 的 nlink 写回磁盘
     // No ip->nlink++ for ".": avoid cyclic ref count.
     if(dirlink(ip, ".", ip->inum) < 0 || dirlink(ip, "..", dp->inum) < 0)
       panic("create dots");
   }
-
-  if(dirlink(dp, name, ip->inum) < 0)
+  
+  //在父目录中创建目录项
+  if(dirlink(dp, name, ip->inum) < 0)//把新 inode ip 添加到父目录 dp 中；
     panic("create: dirlink");
 
   iunlockput(dp);
@@ -286,50 +291,51 @@ create(char *path, short type, short major, short minor)
 uint64
 sys_open(void)
 {
-  char path[MAXPATH];
-  int fd, omode;
-  struct file *f;
-  struct inode *ip;
-  int n;
+  char path[MAXPATH];//用户传入的文件路径名
+  int fd, omode;//fd: 分配的文件描述符；omode: 打开文件的模式（如只读、只写、创建等）；
+  struct file *f;//内核 file 结构指针；
+  struct inode *ip;// inode 指针（文件在内核中的代表）；
+  int n;//接收参数解析的返回值。
 
-  if((n = argstr(0, path, MAXPATH)) < 0 || argint(1, &omode) < 0)
+  if((n = argstr(0, path, MAXPATH)) < 0 || argint(1, &omode) < 0)//argstr(0, ...): 获取第 0 个系统调用参数（文件路径）；argint(1, ...): 获取第 1 个参数（打开模式）；
     return -1;
 
-  begin_op();
+  begin_op();//用于启动文件系统操作（日志系统），确保一致性。调用结束前一定要配对调用 end_op()。
 
-  if(omode & O_CREATE){
-    ip = create(path, T_FILE, 0, 0);
+  if(omode & O_CREATE){//如果 O_CREATE 被设置，则表示需要创建文件；
+    ip = create(path, T_FILE, 0, 0);//create() 会查找路径是否存在，若不存在则创建新的 inode；
     if(ip == 0){
       end_op();
       return -1;
     }
-  } else {
-    if((ip = namei(path)) == 0){
+  } else {//如果不是创建模式：
+    if((ip = namei(path)) == 0){//通过 namei() 查找路径对应的 inode；
       end_op();
       return -1;
     }
-    ilock(ip);
-    if(ip->type == T_DIR && omode != O_RDONLY){
+    ilock(ip);//加锁，保护 inode；
+    if(ip->type == T_DIR && omode != O_RDONLY){//若是目录却不是只读打开，就不允许（防止写目录），释放 inode 并返回。
       iunlockput(ip);
       end_op();
       return -1;
     }
   }
 
-  if(ip->type == T_DEVICE && (ip->major < 0 || ip->major >= NDEV)){
+  if(ip->type == T_DEVICE && (ip->major < 0 || ip->major >= NDEV)){//如果是设备文件，检查设备号是否在合法范围内；
     iunlockput(ip);
     end_op();
     return -1;
   }
 
-  if((f = filealloc()) == 0 || (fd = fdalloc(f)) < 0){
+  if((f = filealloc()) == 0 || (fd = fdalloc(f)) < 0){//filealloc(): 从内核 file[] 表中分配一个未使用项；fdalloc(f): 在当前进程中分配一个文件描述符；
     if(f)
       fileclose(f);
     iunlockput(ip);
     end_op();
     return -1;
   }
-
+  
+  // 设置 file 结构
   if(ip->type == T_DEVICE){
     f->type = FD_DEVICE;
     f->major = ip->major;
@@ -341,7 +347,8 @@ sys_open(void)
   f->readable = !(omode & O_WRONLY);
   f->writable = (omode & O_WRONLY) || (omode & O_RDWR);
 
-  if((omode & O_TRUNC) && ip->type == T_FILE){
+  //截断文件（可选）
+  if((omode & O_TRUNC) && ip->type == T_FILE){//如果指定了 O_TRUNC，且是普通文件，则将文件截断为 0 字节（释放原数据块）。
     itrunc(ip);
   }
 
