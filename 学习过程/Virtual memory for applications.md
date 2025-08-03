@@ -14,6 +14,10 @@
 答：最开始我们使用的是from空间，当用完了的时候，你会将对象拷贝到to空间，一旦完成了扫描，from空间也被完全清空了，你可以切换两个空间的名字。现在会使用to空间来完成内存分配。直到它也满了，你会再次切换。
 - GC和应用程序是不是有不同的Page Table？\
 答：不，它们拥有相同的Page Table。它们只是将物理内存映射到了地址空间的两个位置，也就是Page Table的两个位置。在一个位置，PTE被标记成invalid，在另一个位置，PTE被标记成可读写的。
+- 问：GC什么时候会停止，什么时候又会再开始？我认为GC可以一直运行，如果它是并发的。\
+答：是的，基于虚拟内存的解决方案一个酷的地方在于，GC可以一直运行。它可以在没有unscanned对象时停止。
+- 但是你需要遍历所有在from空间的对象，你怎么知道已经遍历了所有的对象呢？\
+答：你会从根节点开始扫描整个对象的图，然后拷贝到to空间。在某个时间点，你不再添加新的对象了，因为所有的对象已经被拷贝过了。当你不再添加新的对象，你的unscanned区域就不再增长，如果它不再增长，那么你就遍历了所有的对象
 
 # 应用程序使用虚拟内存所需要的特性
 - 今天的话题是用户应用程序使用的虚拟内存，它主要是受这篇1991年的[论文](https://pdos.csail.mit.edu/6.828/2020/readings/appel-li.pdf)的启发。
@@ -215,3 +219,24 @@ void flip() {
 }
 ```
 - flip首先会切换from和to指针，之后将这个应用程序的两个根节点从from空间forward到to空间。
+- 之后GC将root_head和root_last移到to空间中，这样应用程序就不能访问这两个对象，任何时候应用程序需要访问这两个对象，都会导致一个Page Fault。在Page Fault handler中，GC可以将其他对象从from空间拷贝到to空间，然后再Unprot对应的Page。
+- 
+
+## forward函数
+- 这个函数会forward指针o指向的对象，首先检查指针o是不是在from空间，如果是的话，并且之前没有被拷贝过，那么就将它拷贝到to空间。如果之前拷贝过，那么就可以用to空间的指针代替对象指针，并将其返回。
+
+## setup_spaces()
+- 创建一个共享内存对象，并将其两次映射到进程的地址空间中，分别供 mutator 和 collector 使用。
+- 首先是设置内存，通过shm_open创建一个Share-memory object，shm_open是一个Linux/Uinx系统调用；Share-memory object表现的像是一个文件，但是它并不是一个文件，它位于内存，并没有磁盘文件与之对应，可以认为它是一个位于内存的文件系统。
+- 之后我们裁剪这个Shared-memory object到from和to空间的大小
+- 之后我们通过mmap先将其映射一次，以供mutator也就是实际的应用程序使用。
+- 然后再映射一次，以供GC使用
+- 这里shm_open，ftruncate，和两次mmap，等效于map2。
+
+## handle_sigsegv()
+- 在Page Fault hanlder中，GC会运行scan函数。但是scan函数是以GC对应的PTE来运行的，所以它能工作。而同时，应用程序或者mutator不能访问这些Page，如果访问了的话，这会产生Page Fault。一旦scan执行完成，handler中会将Page设置成对应用程序可访问的（注，也就是调用mprotect）
+- 代码是先扫描，再增加内存的访问权限，这样应用程序就可以安全的访问这些内存Page。
+
+# 总结
+- 现在Linux的Page Table是5级的，这样可以处理非常大的地址
+- 
