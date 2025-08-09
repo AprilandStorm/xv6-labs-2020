@@ -284,6 +284,7 @@ create(char *path, short type, short major, short minor)
 }
 
 //修改 sys_open，使其在遇到符号链接的时候，可以递归跟随符号链接，直到跟随到非符号链接的 inode 为止。
+//若 O_CREATE 则创建文件；否则解析 path，遇到符号链接（T_SYMLINK）且没有 O_NOFOLLOW 标志时就读取链接内容并继续解析目标路径，最多跟随一定层数以防循环，最终返回一个指向非符号链接 inode 的打开文件描述符（fd）。
 uint64
 sys_open(void)
 {
@@ -293,13 +294,13 @@ sys_open(void)
   struct inode *ip;
   int n;
 
-  if((n = argstr(0, path, MAXPATH)) < 0 || argint(1, &omode) < 0)
+  if((n = argstr(0, path, MAXPATH)) < 0 || argint(1, &omode) < 0)//argstr把用户传入的第一个参数拷贝到内核缓冲path; argint读取第二个参数（打开模式），并期望这个参数是一个整数值，&omode提供了一个指向整数的指针，用于存储该整数值。
     return -1;
 
   begin_op();
 
   if(omode & O_CREATE){
-    ip = create(path, T_FILE, 0, 0);
+    ip = create(path, T_FILE, 0, 0);//后两个参数表示设备号，如果创建普通文件，则后两个参数无意义
     if(ip == 0){
       end_op();
       return -1;
@@ -307,7 +308,7 @@ sys_open(void)
   } else {
     int symlink_depth = 0;
     while(1){//recursively follow symlinks
-      if((ip = namei(path)) == 0){
+      if((ip = namei(path)) == 0){//按path找到对应inode并增加引用计数
         end_op();
         return -1;
       }
@@ -319,7 +320,7 @@ sys_open(void)
           end_op();
           return -1;
         }
-        if(readi(ip, 0, (uint64)path, 0, MAXPATH) < 0) {
+        if(readi(ip, 0, (uint64)path, 0, MAXPATH) < 0) {//把符号链接文件的内容（即目标路径字符串）读到 path 缓冲区，
           iunlockput(ip);
           end_op();
           return -1;
@@ -329,7 +330,7 @@ sys_open(void)
         break;
       }
     }
-    if(ip->type == T_DIR && omode != O_RDONLY){
+    if(ip->type == T_DIR && omode != O_RDONLY){//检查如果要以写方式打开目录（非只读），则拒绝（不能以非只读打开目录）
       iunlockput(ip);
       end_op();
       return -1;
@@ -342,9 +343,9 @@ sys_open(void)
     return -1;
   }
 
-  if((f = filealloc()) == 0 || (fd = fdalloc(f)) < 0){
+  if((f = filealloc()) == 0 || (fd = fdalloc(f)) < 0){//filealloc() 分配内核 struct file，fdalloc() 在进程文件描述符表分配 fd
     if(f)
-      fileclose(f);
+      fileclose(f);//若 f 已分配要 fileclose(f)；fileclose 会处理 f 的引用和对 ip 的 iput（它会减少 inode 引用），确保资源一致被释放。
     iunlockput(ip);
     end_op();
     return -1;
@@ -362,7 +363,7 @@ sys_open(void)
   f->writable = (omode & O_WRONLY) || (omode & O_RDWR);
 
   if((omode & O_TRUNC) && ip->type == T_FILE){
-    itrunc(ip);
+    itrunc(ip);//如果打开带 O_TRUNC 且是普通文件，则清空文件内容（释放数据块）
   }
 
   iunlock(ip);
@@ -505,29 +506,33 @@ sys_pipe(void)
   return 0;
 }
 
+//首先实现 symlink 系统调用，用于创建符号链接。 
+//符号链接与普通的文件一样，需要占用 inode 块。这里使用 inode 中的第一个 direct-mapped 块（1024字节）来存储符号链接指向的文件。
 uint64
-sys_symlink(void){
+sys_symlink(void){//void 表示它不接受显式参数，但系统调用的参数通过用户态传递并由内核提取。
   struct inode* ip;
-  char target[MAXPATH], path[MAXPATH];
-  if(argstr(0, target, MAXPATH) < 0 || argstr(1, path, MAXPATH) < 0){
+  char target[MAXPATH], path[MAXPATH];//target：存储符号链接所指向的目标路径名（例如 /home/test.txt）;path：存储要创建的符号链接本身的路径名（例如 /tmp/mylink）
+  if(argstr(0, target, MAXPATH) < 0 || argstr(1, path, MAXPATH) < 0){//argstr(n, buf, size) 是一个内核函数，用于从用户空间读取第 n 个字符串参数，复制到内核缓冲区 buf 中，最多 size 字节。
     return -1;
   }
 
-  begin_op();
+  begin_op();//开始一个文件系统操作. 它会：增加“日志操作计数器”;确保在操作完成前不会进行日志提交;提供一定程度的原子性和一致性保障（类似事务）
 
-  ip = create(path, T_SYMLINK, 0, 0);
-  if(ip == 0){
-    end_op();
+  ip = create(path, T_SYMLINK, 0, 0);//创建一个新文件。T_SYMLINK：文件类型为“符号链接”；0, 0：主设备号和次设备号（对普通文件/链接无意义）
+  //注意：create() 成功返回的 ip 通常是 已锁定且引用计数已加 的 inode，后面必须解锁并释放（iunlockput(ip)）。
+  if(ip == 0){//如果创建失败
+    end_op();//必须调用 end_op() 结束操作
     return -1;
   }
   //use the first data block to store target path
-  if(writei(ip, 0, (uint64)target, 0, strlen(target)) < 0){
+  if(writei(ip, 0, (uint64)target, 0, strlen(target)) < 0){//把目标路径写入符号链接的 inode 数据块中
+    iunlockput(ip); //必须释放锁
     end_op();
     return -1;
   }
 
-  iunlockput(ip);
+  iunlockput(ip);//释放对 inode 的锁，并将其放回 inode 缓存
 
-  end_op();
+  end_op();//结束文件系统操作
   return 0;
 }
