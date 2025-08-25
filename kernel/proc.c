@@ -133,6 +133,11 @@ found:
   memset(&p->context, 0, sizeof(p->context));
   p->context.ra = (uint64)forkret;
   p->context.sp = p->kstack + PGSIZE;
+  
+  //clear vmas
+  for(int i = 0; i < NVMA; i++){
+    p->vmas[i].valid = 0;
+  }
 
   return p;
 }
@@ -146,6 +151,17 @@ freeproc(struct proc *p)
   if(p->trapframe)
     kfree((void*)p->trapframe);
   p->trapframe = 0;
+  for(int i = 0; i < NVMA; i++){
+    struct vma* v = &p->vmas[i];
+    //if(!v->valid|| v->sz == 0){ // 只处理有效条目
+      //continue;
+    //}
+    vmaunmap(p->pagetable, v->vastart, v->sz, v);
+    
+    // 清空槽位
+    //v->valid = 0; v->vastart = 0; v->sz = 0; v->flags = 0;
+    //v->offset = 0; v->f = 0;
+  }
   if(p->pagetable)
     proc_freepagetable(p->pagetable, p->sz);
   p->pagetable = 0;
@@ -295,6 +311,28 @@ fork(void)
     if(p->ofile[i])
       np->ofile[i] = filedup(p->ofile[i]);
   np->cwd = idup(p->cwd);
+
+  //copy vmas created by mmap
+  //actual memory page as well as pte will not be copied over
+  // 复制父进程的 vma 结构体，并为 mmap 区域设置写时复制
+  for(i = 0; i < NVMA; i++){
+    struct vma* v = &p->vmas[i];
+    if(v->valid){
+      np->vmas[i] = *v;
+      if(v->f){//如果 vma 关联了一个文件
+        filedup(v->f);
+      }
+        // 如果是私有映射，则调用新的辅助函数来处理COW
+    // 将来你可能还需要处理 MAP_SHARED 等其他情况--------------
+    /*if(v->flags & MAP_PRIVATE){
+      if(uvmcowShare(p->pagetable, np->pagetable, v) < 0){
+        // 错误处理: 释放已分配的资源然后返回失败
+        freeproc(np);
+        release(&np->lock);
+        return -1;
+      }//----------------------------------------------------*/
+    }
+  }
 
   safestrcpy(np->name, p->name, sizeof(p->name));
 

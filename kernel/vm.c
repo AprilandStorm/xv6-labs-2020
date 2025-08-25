@@ -5,6 +5,11 @@
 #include "riscv.h"
 #include "defs.h"
 #include "fs.h"
+#include "fcntl.h"
+#include "proc.h"
+#include "file.h"
+#include "spinlock.h"
+#include "sleeplock.h"
 
 /*
  * the kernel's page table.
@@ -171,8 +176,10 @@ uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
   for(a = va; a < va + npages*PGSIZE; a += PGSIZE){
     if((pte = walk(pagetable, a, 0)) == 0)
       panic("uvmunmap: walk");
+      //continue;
     if((*pte & PTE_V) == 0)
       panic("uvmunmap: not mapped");
+      //continue;
     if(PTE_FLAGS(*pte) == PTE_V)
       panic("uvmunmap: not a leaf");
     if(do_free){
@@ -427,5 +434,87 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
     return 0;
   } else {
     return -1;
+  }
+}
+
+// Remove n BYTES (not pages) of vma mappings starting from va. va must be
+// page-aligned. The mappings NEED NOT exist.
+// Also free the physical memory and write back vma data to disk if necessary.
+/*void
+vmaunmap(pagetable_t pagetable, uint64 va, uint64 nbytes, struct vma* v){
+
+  // 1) 页对齐，确保把整个映射范围的叶子都清干净
+  uint64 start = PGROUNDDOWN(va);
+  uint64 end   = PGROUNDUP(va + nbytes);
+  if (end <= start)
+    return; // 溢出或长度无效
+  
+  //borrowed from "uvmunmap"
+  for(uint64 a = start; a < end; a += PGSIZE){
+    pte_t *pte = walk(pagetable, a, 0);
+    if(pte == 0){
+      continue;
+    }
+    //非叶子保护：V=1 且没有 R/W/X 就是中间页表，不能当叶子清
+    if((*pte & PTE_V) && ((*pte & (PTE_R | PTE_W | PTE_X)) == 0)){
+      panic("sys_munmap: not a leaf");
+    }
+    if((*pte & PTE_V) && (v->flags & MAP_SHARED) && (v->f && v->f->ip) && (*pte & PTE_D)){// dirty, need to write back to disk, 仅文件 + MAP_SHARED + 脏页才写回，并防御 v->f 为空
+      uint64 pa = PTE2PA(*pte);
+
+      int64 aoff = (int64)a - (int64)v->vastart;//offset relative to the start of memory range
+      
+      begin_op();
+      ilock(v->f->ip);
+
+      if(aoff < 0){//if the first page is not a full 4k page
+        writei(v->f->ip, 0, pa + (uint64)(-aoff), v->offset, PGSIZE + aoff);
+      }else if(aoff + (int64)PGSIZE > (int64)v->sz){// if the last page is not a full 4k page
+        writei(v->f->ip, 0, pa, v->offset + (uint64)aoff, v->sz - (uint64)aoff);
+      }else{//full 4k pages
+        writei(v->f->ip, 0, pa, v->offset + (uint64)aoff, PGSIZE);
+      }
+      iunlock(v->f->ip);
+      end_op();
+    }
+  }
+  // ——真正的“解除映射 + 释放物理页”，统一交给 uvmunmap ——  
+  // 这样不会遗漏叶子，也避免和 freewalk 的递归规则打架
+  uvmunmap(pagetable, start, (end - start) / PGSIZE, 1);
+}*/
+
+void
+vmaunmap(pagetable_t pagetable, uint64 va, uint64 nbytes, struct vma *v)
+{
+  uint64 a;
+  pte_t *pte;
+
+  // printf("unmapping %d bytes from %p\n",nbytes, va);
+
+  // borrowed from "uvmunmap"
+  for(a = va; a < va + nbytes; a += PGSIZE){
+    if((pte = walk(pagetable, a, 0)) == 0)
+      continue;
+    if(PTE_FLAGS(*pte) == PTE_V)
+      panic("sys_munmap: not a leaf");
+    if(*pte & PTE_V){
+      uint64 pa = PTE2PA(*pte);
+      if((*pte & PTE_D) && (v->flags & MAP_SHARED)) { // dirty, need to write back to disk
+        begin_op();
+        ilock(v->f->ip);
+        uint64 aoff = a - v->vastart; // offset relative to the start of memory range
+        if(aoff < 0) { // if the first page is not a full 4k page
+          writei(v->f->ip, 0, pa + (-aoff), v->offset, PGSIZE + aoff);
+        } else if(aoff + PGSIZE > v->sz){  // if the last page is not a full 4k page
+          writei(v->f->ip, 0, pa, v->offset + aoff, v->sz - aoff);
+        } else { // full 4k pages
+          writei(v->f->ip, 0, pa, v->offset + aoff, PGSIZE);
+        }
+        iunlock(v->f->ip);
+        end_op();
+      }
+      kfree((void*)pa);
+      *pte = 0;
+    }
   }
 }

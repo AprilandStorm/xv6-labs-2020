@@ -1,9 +1,12 @@
+#ifndef PROC_H
+#define PROC_H
+#include "spinlock.h"
 // Saved registers for kernel context switches.
 struct context {
   uint64 ra;
   uint64 sp;
 
-  // callee-saved
+  // callee-saved   
   uint64 s0;
   uint64 s1;
   uint64 s2;
@@ -82,6 +85,20 @@ struct trapframe {
 
 enum procstate { UNUSED, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
 
+//定义vma结构体，其中包含了 mmap 映射的内存区域的各种必要信息，比如开始地址、大小、所映射文件、文件内偏移以及权限等
+//并且在 proc 结构体末尾为每个进程加上 16 个 vma 空槽
+struct vma{
+  int valid;
+  uint64 vastart;
+  uint64 sz;
+  struct file* f;
+  int prot;
+  int flags;
+  uint64 offset;
+};
+
+#define NVMA 16
+
 // Per-process state
 struct proc {
   struct spinlock lock;
@@ -103,4 +120,6 @@ struct proc {
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
+  struct vma vmas[NVMA];       // virtual memory areas
 };
+#endif
