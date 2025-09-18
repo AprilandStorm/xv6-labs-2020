@@ -7,15 +7,15 @@
 
 struct mbuf {
   struct mbuf  *next; // the next mbuf in the chain
-  char         *head; // the current start position of the buffer
+  char         *head; // the current start position of the buffer,head 指向 buf 内的某个位置（通常初始化为 buf + headroom），表示当前数据从 head 开始，长度为 len。
   unsigned int len;   // the length of the buffer
-  char         buf[MBUF_SIZE]; // the backing store
+  char         buf[MBUF_SIZE]; // the backing store 实际存储区
 };
 
-char *mbufpull(struct mbuf *m, unsigned int len);
-char *mbufpush(struct mbuf *m, unsigned int len);
-char *mbufput(struct mbuf *m, unsigned int len);
-char *mbuftrim(struct mbuf *m, unsigned int len);
+char *mbufpull(struct mbuf *m, unsigned int len);//从头部“取出/消费”len 字节,常用于“读取并移除头部已解析的协议头”。
+char *mbufpush(struct mbuf *m, unsigned int len);//在头部前面增加 len 字节（回退 head）以便写入新头部）
+char *mbufput(struct mbuf *m, unsigned int len);//在尾部追加 len 字节
+char *mbuftrim(struct mbuf *m, unsigned int len);//从尾部删除 len 字节
 
 // The above functions manipulate the size and position of the buffer:
 //            <- push            <- trim
@@ -30,31 +30,31 @@ char *mbuftrim(struct mbuf *m, unsigned int len);
 #define mbufputhdr(mbuf, hdr) (typeof(hdr)*)mbufput(mbuf, sizeof(hdr))
 #define mbuftrimhdr(mbuf, hdr) (typeof(hdr)*)mbuftrim(mbuf, sizeof(hdr))
 
-struct mbuf *mbufalloc(unsigned int headroom);
-void mbuffree(struct mbuf *m);
+struct mbuf *mbufalloc(unsigned int headroom);//分配一块 mbuf
+void mbuffree(struct mbuf *m);//释放一个 mbuf
 
 struct mbufq {
   struct mbuf *head;  // the first element in the queue
   struct mbuf *tail;  // the last element in the queue
 };
 
-void mbufq_pushtail(struct mbufq *q, struct mbuf *m);
-struct mbuf *mbufq_pophead(struct mbufq *q);
+void mbufq_pushtail(struct mbufq *q, struct mbuf *m);//驱动或上层把包 pushtail 到队列
+struct mbuf *mbufq_pophead(struct mbufq *q);//消费者用 pophead 取包
 int mbufq_empty(struct mbufq *q);
 void mbufq_init(struct mbufq *q);
 
 
 //
-// endianness support
+// endianness support 字节序相关
 //
 
-static inline uint16 bswaps(uint16 val)
+static inline uint16 bswaps(uint16 val)//字节翻转
 {
   return (((val & 0x00ffU) << 8) |
           ((val & 0xff00U) >> 8));
 }
 
-static inline uint32 bswapl(uint32 val)
+static inline uint32 bswapl(uint32 val)//字节翻转
 {
   return (((val & 0x000000ffUL) << 24) |
           ((val & 0x0000ff00UL) << 8) |
